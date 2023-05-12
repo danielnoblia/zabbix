@@ -1,0 +1,189 @@
+zabbix_export:
+  version: '6.4'
+  template_groups:
+    -
+      uuid: d4b004d0b2ad4e5c9972bad031798e59
+      name: 'Certificate Monitoring'
+    -
+      uuid: 7df96b18c230490a9a0a9e2307226338
+      name: Templates
+  templates:
+    -
+      uuid: dd115f91e2394aa4838ec84c7824e00c
+      template: 'Microsoft Certificate Authority Certificate monitoring Per CA Template'
+      name: 'Microsoft Certificate Authority Certificate monitoring Per CA Template'
+      groups:
+        -
+          name: 'Certificate Monitoring'
+        -
+          name: Templates
+      items:
+        -
+          uuid: 1c4e9bdf833c45348d1e5096a1886bef
+          name: 'System local time'
+          key: system.localtime
+          history: 7d
+          units: unixtime
+          description: 'The local system time of the host.'
+          tags:
+            -
+              tag: component
+              value: system
+        -
+          uuid: 4463a239889440d1bbc505a75f26ea37
+          name: 'Get certificate data'
+          key: 'system.run[powershell -NoProfile -ExecutionPolicy bypass -File "C:\Zabbix\Zabbix Agent 2\scripts\certmon_get_certs.ps1" {$CRT_HOSTNAME} {$CRT_TEMPLATE}]'
+          delay: 1h
+          history: 1d
+          trends: '0'
+          value_type: TEXT
+        -
+          uuid: e0e9649faffc42b7b67ace8203edbe6b
+          name: Uptime
+          key: system.uptime
+          delay: 30s
+          history: 2w
+          trends: '0'
+          units: uptime
+          description: 'The system uptime expressed in the following format:"N days, hh:mm:ss".'
+          tags:
+            -
+              tag: component
+              value: system
+      discovery_rules:
+        -
+          uuid: a6688d2e4f13413e9e9df83701ee159d
+          name: 'Certificate discovery'
+          type: DEPENDENT
+          key: certificate.discovery
+          delay: '0'
+          lifetime: 6h
+          item_prototypes:
+            -
+              uuid: d6e4a63824ef4e47be0740b7e80531f6
+              name: 'Certificate [ ID #{#REQUEST_ID} ] {#COMMON_NAME} with {#TEMPLATE_NAME2} - Expiration date'
+              type: DEPENDENT
+              key: 'certificate.expiration_date[{#REQUEST_ID}]'
+              delay: '0'
+              history: 1d
+              trends: '0'
+              units: unixtime
+              preprocessing:
+                -
+                  type: JSONPATH
+                  parameters:
+                    - '$[?(@.RequestID == {#REQUEST_ID})].NotAfter'
+                -
+                  type: REGEX
+                  parameters:
+                    - (\d+)
+                    - ' \1'
+                -
+                  type: MULTIPLIER
+                  parameters:
+                    - '0.001'
+                -
+                  type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1d
+              master_item:
+                key: 'system.run[powershell -NoProfile -ExecutionPolicy bypass -File "C:\Zabbix\Zabbix Agent 2\scripts\certmon_get_certs.ps1" {$CRT_HOSTNAME} {$CRT_TEMPLATE}]'
+              tags:
+                -
+                  tag: cert_requestor
+                  value: '{{#REQUESTOR_NAME}.regsub("\\(\w+)", "\1")}'
+                -
+                  tag: cert_template2
+                  value: '{#TEMPLATE_NAME2}'
+                -
+                  tag: scope
+                  value: 'certificate / expiration date'
+            -
+              uuid: d1bc9a14e9144c7d91555f226edda18c
+              name: 'Certificate [ ID #{#REQUEST_ID} ] {#COMMON_NAME}  with {#TEMPLATE_NAME2} - Days to expire'
+              type: CALCULATED
+              key: 'certificate.remaining_days[{#REQUEST_ID}]'
+              delay: 6h
+              history: 1d
+              trends: '0'
+              value_type: FLOAT
+              params: '(last(//certificate.expiration_date[{#REQUEST_ID}]) - now()) / 86400'
+              preprocessing:
+                -
+                  type: REGEX
+                  parameters:
+                    - '^(-?\d+)'
+                    - \1
+                -
+                  type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1d
+              tags:
+                -
+                  tag: cert_requestor
+                  value: '{{#REQUESTOR_NAME}.regsub("\\(\w+)", "\1")}'
+                -
+                  tag: cert_template2
+                  value: '{#TEMPLATE_NAME2}'
+                -
+                  tag: scope
+                  value: 'certificate / expiration date'
+              trigger_prototypes:
+                -
+                  uuid: 6c6a62d6114341b4b8e048b95fa489b1
+                  expression: 'last(/Microsoft Certificate Authority Certificate monitoring Per CA Template/certificate.remaining_days[{#REQUEST_ID}])<={$CRT_CRITICAL}'
+                  name: 'Certificate will expire within {$CRT_CRITICAL} days – {#COMMON_NAME}'
+                  opdata: 'Expires in {ITEM.LASTVALUE1} days'
+                  priority: HIGH
+                  manual_close: 'YES'
+                  tags:
+                    -
+                      tag: cert_cn
+                      value: '{#COMMON_NAME}'
+                    -
+                      tag: cert_id
+                      value: '{#REQUEST_ID}'
+                -
+                  uuid: ba80e44a6e674937ae913c31d2bb1d5e
+                  expression: 'last(/Microsoft Certificate Authority Certificate monitoring Per CA Template/certificate.remaining_days[{#REQUEST_ID}])<={$CRT_WARNING}'
+                  name: 'Certificate will expire within {$CRT_WARNING} days – {#COMMON_NAME}'
+                  opdata: 'Expires in {ITEM.LASTVALUE1} days'
+                  priority: WARNING
+                  manual_close: 'YES'
+                  tags:
+                    -
+                      tag: cert_cn
+                      value: '{#COMMON_NAME}'
+                    -
+                      tag: cert_id
+                      value: '{#REQUEST_ID}'
+          master_item:
+            key: 'system.run[powershell -NoProfile -ExecutionPolicy bypass -File "C:\Zabbix\Zabbix Agent 2\scripts\certmon_get_certs.ps1" {$CRT_HOSTNAME} {$CRT_TEMPLATE}]'
+          lld_macro_paths:
+            -
+              lld_macro: '{#COMMON_NAME}'
+              path: $.CommonName
+            -
+              lld_macro: '{#REQUESTOR_NAME}'
+              path: '$.["Request.RequesterName"]'
+            -
+              lld_macro: '{#REQUEST_ID}'
+              path: $.RequestID
+            -
+              lld_macro: '{#TEMPLATE_NAME2}'
+              path: $.CertificateTemplateOid.FriendlyName
+      macros:
+        -
+          macro: '{$CRT_CRITICAL}'
+          value: '5'
+          description: 'Critical trigger'
+        -
+          macro: '{$CRT_HOSTNAME}'
+          description: 'Issuing certificate authority host name'
+        -
+          macro: '{$CRT_TEMPLATE}'
+          description: 'Certifikat template to monitor'
+        -
+          macro: '{$CRT_WARNING}'
+          value: '20'
+          description: 'Warning trigger'
