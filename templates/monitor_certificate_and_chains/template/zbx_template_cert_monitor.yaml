@@ -1,0 +1,432 @@
+zabbix_export:
+  version: '7.4'
+  template_groups:
+    - uuid: d63f2789475c4246bf63aa82b5fe115a
+      name: 'Templates/Network'
+  templates:
+    - uuid: a3dacf9da9794df4866cfadb2555b317
+      template: 'Template - Certificate and Chain Monitor'
+      name: 'Certificate and Chain Monitor'
+      description: |
+        Monitors SSL/TLS certificates and certificate chains via external script.
+
+        SETUP:
+          1. Copy externalscripts/check_cert_chain.py to the Zabbix ExternalScripts
+             directory (see ExternalScripts= in zabbix_server.conf).
+          2. Make it executable: chmod +x check_cert_chain.py
+          3. Ensure openssl is available on the Zabbix server.
+          4. Apply this template to a host whose Name is the FQDN to monitor.
+             Override {$CERT_HOSTNAME} per host if FQDN differs from host Name.
+
+        WHAT IS CHECKED:
+          - Certificate expiry (WARNING at 30 days, HIGH at 14 days, DISASTER if expired)
+          - Issuing CA (intermediate) present in TLS handshake chain
+          - Hostname/SAN match against monitored FQDN
+          - Self-signed certificate detection
+          - TLS connection failure (DNS, TCP, handshake)
+      groups:
+        - name: 'Templates/Network'
+      macros:
+        - macro: '{$CERT_PORT}'
+          value: '443'
+          description: 'TCP port to connect to (default: 443 for HTTPS).'
+        - macro: '{$CERT_EXPIRY_WARN_DAYS}'
+          value: '30'
+          description: 'Days remaining before WARNING trigger fires.'
+        - macro: '{$CERT_EXPIRY_CRIT_DAYS}'
+          value: '14'
+          description: 'Days remaining before HIGH trigger fires.'
+      items:
+        # ── Master item ──────────────────────────────────────────────────────────
+        - uuid: d57ffb46b69941afaa0cacd507581c90
+          name: 'SSL certificate chain raw data'
+          type: EXTERNAL
+          key: 'check_cert_chain.py[{HOST.NAME},{$CERT_PORT}]'
+          delay: 1h
+          history: 7d
+          trends: '0'
+          value_type: TEXT
+          description: 'Full JSON output from check_cert_chain.py. All other items derive from this.'
+          tags:
+            - tag: component
+              value: certificate
+
+        # ── Dependent items ───────────────────────────────────────────────────────
+        - uuid: d65d9d8aaafd42869e6d383b0ba067a3
+          name: 'SSL certificate check status'
+          type: DEPENDENT
+          key: cert.status
+          delay: '0'
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          description: '"ok" = check succeeded. "error" = connection/parse failure.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.status'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: error
+          master_item:
+            key: 'check_cert_chain.py[{HOST.NAME},{$CERT_PORT}]'
+          tags:
+            - tag: component
+              value: certificate
+
+        - uuid: 9ef1ffb350f44ff3a6d085e13eb337cf
+          name: 'SSL certificate check error message'
+          type: DEPENDENT
+          key: cert.error
+          delay: '0'
+          history: 7d
+          trends: '0'
+          value_type: TEXT
+          description: 'Error detail when check status is "error", empty string otherwise.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.error'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: ''
+          master_item:
+            key: 'check_cert_chain.py[{HOST.NAME},{$CERT_PORT}]'
+          tags:
+            - tag: component
+              value: certificate
+
+        - uuid: d5c3784d37694c48ae3478e99ca80e64
+          name: 'SSL certificate days remaining'
+          type: DEPENDENT
+          key: cert.days_remaining
+          delay: '0'
+          history: 90d
+          trends: 365d
+          value_type: FLOAT
+          description: 'Days until the leaf certificate expires. Negative = already expired.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.leaf_cert.days_remaining'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '-999'
+          master_item:
+            key: 'check_cert_chain.py[{HOST.NAME},{$CERT_PORT}]'
+          tags:
+            - tag: component
+              value: certificate
+
+        - uuid: 21bcd128bc6749e48ccf2c4bc16efbba
+          name: 'SSL leaf certificate subject'
+          type: DEPENDENT
+          key: cert.subject
+          delay: '0'
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.leaf_cert.subject'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: ''
+          master_item:
+            key: 'check_cert_chain.py[{HOST.NAME},{$CERT_PORT}]'
+          tags:
+            - tag: component
+              value: certificate
+
+        - uuid: fd29bc7fac18407f9cb2003b7f181e44
+          name: 'SSL leaf certificate issuer'
+          type: DEPENDENT
+          key: cert.issuer
+          delay: '0'
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.leaf_cert.issuer'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: ''
+          master_item:
+            key: 'check_cert_chain.py[{HOST.NAME},{$CERT_PORT}]'
+          tags:
+            - tag: component
+              value: certificate
+
+        - uuid: 1e4a052293be4f26931bdac6d71f5f35
+          name: 'SSL certificate expiry date'
+          type: DEPENDENT
+          key: cert.not_after
+          delay: '0'
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          description: 'ISO-8601 timestamp of the leaf certificate NotAfter field.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.leaf_cert.not_after'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: ''
+          master_item:
+            key: 'check_cert_chain.py[{HOST.NAME},{$CERT_PORT}]'
+          tags:
+            - tag: component
+              value: certificate
+
+        - uuid: 61389953c3fe4fa6ae119b609b449841
+          name: 'SSL leaf certificate serial number'
+          type: DEPENDENT
+          key: cert.serial
+          delay: '0'
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.leaf_cert.serial'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: ''
+          master_item:
+            key: 'check_cert_chain.py[{HOST.NAME},{$CERT_PORT}]'
+          tags:
+            - tag: component
+              value: certificate
+
+        - uuid: 9056bd39564b4aaabd4a813df16781a2
+          name: 'SSL certificate hostname match'
+          type: DEPENDENT
+          key: cert.hostname_match
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: UNSIGNED
+          description: '1 = hostname matches certificate SAN/CN, 0 = mismatch.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.leaf_cert.hostname_match'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '1'
+          master_item:
+            key: 'check_cert_chain.py[{HOST.NAME},{$CERT_PORT}]'
+          tags:
+            - tag: component
+              value: certificate
+
+        - uuid: f53e06dcd79a44ddb2b5aedf8464f1b5
+          name: 'SSL certificate is expired'
+          type: DEPENDENT
+          key: cert.is_expired
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: UNSIGNED
+          description: '1 = certificate has passed its NotAfter date, 0 = still valid.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.leaf_cert.is_expired'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '0'
+          master_item:
+            key: 'check_cert_chain.py[{HOST.NAME},{$CERT_PORT}]'
+          tags:
+            - tag: component
+              value: certificate
+
+        - uuid: 05b90a9008b14005bf81ac97a4a76461
+          name: 'SSL certificate is self-signed'
+          type: DEPENDENT
+          key: cert.is_self_signed
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: UNSIGNED
+          description: '1 = self-signed (Subject == Issuer), 0 = CA-signed.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.leaf_cert.is_self_signed'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '0'
+          master_item:
+            key: 'check_cert_chain.py[{HOST.NAME},{$CERT_PORT}]'
+          tags:
+            - tag: component
+              value: certificate
+
+        - uuid: 4af1815ddd2f4c54b76c66a4dc7d7cc1
+          name: 'SSL certificate chain depth'
+          type: DEPENDENT
+          key: cert.chain_depth
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: UNSIGNED
+          description: 'Number of certificates presented by the server during TLS handshake.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.chain.depth'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '0'
+          master_item:
+            key: 'check_cert_chain.py[{HOST.NAME},{$CERT_PORT}]'
+          tags:
+            - tag: component
+              value: chain
+
+        - uuid: a485e270fb5d48e4a4244c0b1ba68962
+          name: 'SSL issuing CA present in chain'
+          type: DEPENDENT
+          key: cert.issuing_ca_in_chain
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: UNSIGNED
+          description: '1 = the intermediate CA that signed the leaf certificate is included in the TLS handshake chain. 0 = missing — clients without AIA-fetching support will fail.'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.chain.issuing_ca_in_chain'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '1'
+          master_item:
+            key: 'check_cert_chain.py[{HOST.NAME},{$CERT_PORT}]'
+          tags:
+            - tag: component
+              value: chain
+
+        - uuid: 60e7ffb321b14740a1a09c1a1b6ed703
+          name: 'SSL certificate chain path'
+          type: DEPENDENT
+          key: cert.chain_path
+          delay: '0'
+          history: 7d
+          trends: '0'
+          value_type: TEXT
+          description: 'JSON array describing the certificate path: [{index, cn, role, is_self_signed}, ...]'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.chain.path'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '[]'
+          master_item:
+            key: 'check_cert_chain.py[{HOST.NAME},{$CERT_PORT}]'
+          tags:
+            - tag: component
+              value: chain
+
+        - uuid: 2d5d2feb31764e2a8bd21d1a7eb88de2
+          name: 'SSL/TLS protocol version'
+          type: DEPENDENT
+          key: cert.tls_version
+          delay: '0'
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          description: 'TLS protocol version negotiated (e.g. TLSv1.3).'
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.tls_version'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: unknown
+          master_item:
+            key: 'check_cert_chain.py[{HOST.NAME},{$CERT_PORT}]'
+          tags:
+            - tag: component
+              value: certificate
+
+  triggers:
+    - uuid: 0af964f91f104a3b99fa551f4ed0e54f
+      expression: 'last(/Template - Certificate and Chain Monitor/cert.status)<>"ok"'
+      name: 'SSL certificate check failed for {HOST.NAME}:{$CERT_PORT}'
+      priority: HIGH
+      description: 'The external check script could not connect to or negotiate TLS with {$CERT_HOSTNAME}:{$CERT_PORT}. See cert.error item for details.'
+      tags:
+        - tag: scope
+          value: availability
+
+    - uuid: ec9fc9825ab9422da74c8896bad4dec6
+      expression: 'last(/Template - Certificate and Chain Monitor/cert.is_expired)=1 and last(/Template - Certificate and Chain Monitor/cert.status)="ok"'
+      name: 'SSL certificate has expired on {HOST.NAME}:{$CERT_PORT}'
+      priority: DISASTER
+      description: 'The leaf certificate NotAfter date has passed.'
+      tags:
+        - tag: scope
+          value: security
+      dependencies:
+        - name: 'SSL certificate check failed for {HOST.NAME}:{$CERT_PORT}'
+          expression: 'last(/Template - Certificate and Chain Monitor/cert.status)<>"ok"'
+
+    - uuid: 779f145ae42d47e58a95af70a8f7049f
+      expression: 'last(/Template - Certificate and Chain Monitor/cert.days_remaining)>0 and last(/Template - Certificate and Chain Monitor/cert.days_remaining)<={$CERT_EXPIRY_CRIT_DAYS} and last(/Template - Certificate and Chain Monitor/cert.status)="ok"'
+      name: 'SSL certificate expires in {ITEM.VALUE} days on {HOST.NAME}:{$CERT_PORT}'
+      priority: HIGH
+      description: 'Certificate will expire within {$CERT_EXPIRY_CRIT_DAYS} days.'
+      tags:
+        - tag: scope
+          value: security
+      dependencies:
+        - name: 'SSL certificate check failed for {HOST.NAME}:{$CERT_PORT}'
+          expression: 'last(/Template - Certificate and Chain Monitor/cert.status)<>"ok"'
+        - name: 'SSL certificate has expired on {HOST.NAME}:{$CERT_PORT}'
+          expression: 'last(/Template - Certificate and Chain Monitor/cert.is_expired)=1 and last(/Template - Certificate and Chain Monitor/cert.status)="ok"'
+
+    - uuid: 77cd264b6e6d431fa563afed708459bd
+      expression: 'last(/Template - Certificate and Chain Monitor/cert.days_remaining)>{$CERT_EXPIRY_CRIT_DAYS} and last(/Template - Certificate and Chain Monitor/cert.days_remaining)<={$CERT_EXPIRY_WARN_DAYS} and last(/Template - Certificate and Chain Monitor/cert.status)="ok"'
+      name: 'SSL certificate expires in {ITEM.VALUE} days on {HOST.NAME}:{$CERT_PORT}'
+      priority: WARNING
+      description: 'Certificate will expire within {$CERT_EXPIRY_WARN_DAYS} days.'
+      tags:
+        - tag: scope
+          value: security
+      dependencies:
+        - name: 'SSL certificate check failed for {HOST.NAME}:{$CERT_PORT}'
+          expression: 'last(/Template - Certificate and Chain Monitor/cert.status)<>"ok"'
+        - name: 'SSL certificate has expired on {HOST.NAME}:{$CERT_PORT}'
+          expression: 'last(/Template - Certificate and Chain Monitor/cert.is_expired)=1 and last(/Template - Certificate and Chain Monitor/cert.status)="ok"'
+        - name: 'SSL certificate expires in {ITEM.VALUE} days on {HOST.NAME}:{$CERT_PORT}'
+          expression: 'last(/Template - Certificate and Chain Monitor/cert.days_remaining)>0 and last(/Template - Certificate and Chain Monitor/cert.days_remaining)<={$CERT_EXPIRY_CRIT_DAYS} and last(/Template - Certificate and Chain Monitor/cert.status)="ok"'
+
+    - uuid: c0bbafd88f67495d82e52845ac1af8ea
+      expression: 'last(/Template - Certificate and Chain Monitor/cert.issuing_ca_in_chain)=0 and last(/Template - Certificate and Chain Monitor/cert.status)="ok"'
+      name: 'Issuing CA not sent in TLS chain by {HOST.NAME}:{$CERT_PORT}'
+      priority: HIGH
+      description: 'The server is NOT including the intermediate (issuing) CA in the TLS handshake. Clients without AIA-fetching support will fail validation.'
+      tags:
+        - tag: scope
+          value: security
+      dependencies:
+        - name: 'SSL certificate check failed for {HOST.NAME}:{$CERT_PORT}'
+          expression: 'last(/Template - Certificate and Chain Monitor/cert.status)<>"ok"'
+
+    - uuid: 46590eacdf6d4409ab98b22b67764445
+      expression: 'last(/Template - Certificate and Chain Monitor/cert.hostname_match)=0 and last(/Template - Certificate and Chain Monitor/cert.status)="ok" and last(/Template - Certificate and Chain Monitor/cert.is_self_signed)=0'
+      name: 'SSL certificate hostname mismatch on {HOST.NAME}:{$CERT_PORT}'
+      priority: HIGH
+      description: 'The certificate SAN/CN does not match {$CERT_HOSTNAME}. Clients will receive a certificate name mismatch error.'
+      tags:
+        - tag: scope
+          value: security
+      dependencies:
+        - name: 'SSL certificate check failed for {HOST.NAME}:{$CERT_PORT}'
+          expression: 'last(/Template - Certificate and Chain Monitor/cert.status)<>"ok"'
+
+    - uuid: e0d391d5cae747e499889abb97865ea5
+      expression: 'last(/Template - Certificate and Chain Monitor/cert.is_self_signed)=1 and last(/Template - Certificate and Chain Monitor/cert.status)="ok"'
+      name: 'Self-signed certificate detected on {HOST.NAME}:{$CERT_PORT}'
+      priority: WARNING
+      description: 'The server is presenting a self-signed certificate. Public clients will not trust it.'
+      tags:
+        - tag: scope
+          value: security
+      dependencies:
+        - name: 'SSL certificate check failed for {HOST.NAME}:{$CERT_PORT}'
+          expression: 'last(/Template - Certificate and Chain Monitor/cert.status)<>"ok"'
