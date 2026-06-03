@@ -164,15 +164,20 @@ def check_hostname_match(hostname, cert_info):
     return 0
 
 
-def verify_chain_self_contained(pem_certs, cert_infos):
+def verify_chain(pem_certs, cert_infos, s_client_output):
     """
-    Verify the leaf cert using only the certificates the server presented.
-    Self-signed certs in the chain are used as trust anchors (e.g. ISRG Root X1).
-    Intermediates are passed as -untrusted.
+    Verify that the certificate chain the server presented is complete.
 
-    Returns 1 if the chain verifies, 0 if it is broken or incomplete.
-    A broken chain means the server is not sending all required intermediate CAs —
-    clients that lack AIA-fetching or a newer trust store will fail validation.
+    Strategy:
+    - If the server included a self-signed root (e.g. ISRG Root X1), perform a
+      self-contained openssl verify using only the presented certs. This catches
+      missing cross-signed intermediates (Root YR, Root YE, ISRG Root X2) regardless
+      of the Zabbix server's own trust store.
+    - If no self-signed root was sent (e.g. DigiCert, where the root is in the
+      system trust store and intentionally omitted), fall back to the Verify return
+      code from openssl s_client. Code 0 = OK, anything else = broken.
+
+    Returns 1 if chain is complete, 0 if broken.
     """
     if not pem_certs:
         return 0
@@ -186,7 +191,10 @@ def verify_chain_self_contained(pem_certs, cert_infos):
     ]
 
     if not trust_anchor_pems:
-        return 0
+        # Server omitted root — fall back to s_client verify return code
+        m = re.search(r"Verify return code:\s*(\d+)", s_client_output)
+        verify_code = int(m.group(1)) if m else -1
+        return 1 if verify_code == 0 else 0
 
     tmp_files = []
     try:
@@ -284,7 +292,7 @@ def main():
         # Chain completeness: verify leaf using presented certs as trust bundle.
         # Self-signed certs in the chain (e.g. ISRG Root X1) become trust anchors.
         # Returns 0 if the chain is broken (missing intermediate like Root YR / Root YE).
-        chain_verified = verify_chain_self_contained(pem_certs, cert_infos)
+        chain_verified = verify_chain(pem_certs, cert_infos, s_client_out)
 
         # Chain path (human-readable summary)
         chain_path = []

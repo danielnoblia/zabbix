@@ -141,11 +141,15 @@ def check_hostname_match(hostname, cert_info):
     return False
 
 
-def verify_chain_self_contained(pem_certs, cert_infos):
+def verify_chain(pem_certs, cert_infos, s_client_output):
     """
-    Verify the leaf cert using only the certificates the server presented.
-    Self-signed certs are used as trust anchors; others as -untrusted intermediates.
-    Returns True if chain verifies, False if broken/incomplete.
+    Verify that the certificate chain the server presented is complete.
+
+    If the server included a self-signed root, perform a self-contained verify
+    using only the presented certs. If no root was sent (e.g. DigiCert), fall
+    back to the Verify return code from openssl s_client.
+
+    Returns True if chain is complete, False if broken.
     """
     if not pem_certs:
         return False
@@ -159,7 +163,9 @@ def verify_chain_self_contained(pem_certs, cert_infos):
     ]
 
     if not trust_anchor_pems:
-        return False
+        m = re.search(r"Verify return code:\s*(\d+)", s_client_output)
+        verify_code = int(m.group(1)) if m else -1
+        return verify_code == 0
 
     tmp_files = []
     try:
@@ -253,7 +259,7 @@ def main():
         issuing_ca_in_chain = any(
             cert_infos[i].get("subject") == leaf_issuer for i in range(1, depth)
         )
-        chain_verified = verify_chain_self_contained(pem_certs, cert_infos)
+        chain_verified = verify_chain(pem_certs, cert_infos, s_client_out)
 
         cn = get_cn(leaf.get("subject", hostname))
 
