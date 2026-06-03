@@ -432,7 +432,7 @@ zabbix_export:
         - name: 'SSL certificate check failed for {HOST.NAME}:{$CERT_PORT}'
           expression: 'last(/Template - Certificate and Chain Monitor/cert.status)<>"ok"'
 
-    - uuid: f1e2d3c4b5a6978800112233445566778
+    - uuid: f1e2d3c4b5a697880011223344556677
       expression: 'last(/Template - Certificate and Chain Monitor/cert.chain_verified)=0 and last(/Template - Certificate and Chain Monitor/cert.status)="ok"'
       name: 'Incomplete TLS chain on {HOST.NAME}:{$CERT_PORT} — cross-signed CA missing'
       priority: HIGH
