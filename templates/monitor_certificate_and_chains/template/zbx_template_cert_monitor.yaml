@@ -280,7 +280,7 @@ zabbix_export:
             - tag: component
               value: chain
 
-        - uuid: b7c2e1f4a8d34e5f9012345678901234
+        - uuid: d980c1fd18f14b54b881a98282750653
           name: 'SSL certificate chain verified'
           type: DEPENDENT
           key: cert.chain_verified
@@ -432,7 +432,7 @@ zabbix_export:
         - name: 'SSL certificate check failed for {HOST.NAME}:{$CERT_PORT}'
           expression: 'last(/Template - Certificate and Chain Monitor/cert.status)<>"ok"'
 
-    - uuid: f1e2d3c4b5a697880011223344556677
+    - uuid: 5e4750f774d24524a694b7f42344b761
       expression: 'last(/Template - Certificate and Chain Monitor/cert.chain_verified)=0 and last(/Template - Certificate and Chain Monitor/cert.status)="ok"'
       name: 'Incomplete TLS chain on {HOST.NAME}:{$CERT_PORT} — cross-signed CA missing'
       priority: HIGH
