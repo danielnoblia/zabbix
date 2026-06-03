@@ -434,18 +434,18 @@ zabbix_export:
 
     - uuid: 5e4750f774d24524a694b7f42344b761
       expression: 'last(/Template - Certificate and Chain Monitor/cert.chain_verified)=0 and last(/Template - Certificate and Chain Monitor/cert.status)="ok"'
-      name: 'Incomplete TLS chain on {HOST.NAME}:{$CERT_PORT} — cross-signed CA missing'
+      name: 'Incomplete TLS chain on {HOST.NAME}:{$CERT_PORT}'
       priority: HIGH
       description: |
         The server is presenting an incomplete certificate chain. The chain cannot be verified
         using only the certificates the server sent.
 
-        This typically means a cross-signed intermediate CA is missing, for example:
-          RSA:   Root YR (cross-signed by ISRG Root X1) is absent
-          ECDSA: Root YE or ISRG Root X2 (cross-signed by ISRG Root X1) is absent
+        Possible causes:
+          - A cross-signed intermediate CA is missing (e.g. Root YR, Root YE, ISRG Root X2)
+          - The intermediate CA is missing entirely (chain.pem not included in TLS config)
+          - Wrong intermediate sent (issuer mismatch after cert rotation)
 
-        Clients that do not have the newer ISRG root CAs in their trust store and cannot
-        perform AIA fetching will fail TLS validation.
+        Check "Issuing CA present" and "Chain depth" in the service details to narrow down the cause.
       tags:
         - tag: scope
           value: security

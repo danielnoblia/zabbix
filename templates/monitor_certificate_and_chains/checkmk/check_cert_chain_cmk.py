@@ -282,7 +282,7 @@ def main():
             state = max(state, STATE_CRITICAL)
 
         if not chain_verified and not is_self_signed:
-            issues.append("incomplete chain — cross-signed CA missing (Root YR / Root YE / ISRG Root X2)")
+            issues.append("incomplete chain — CA missing or chain cannot be verified")
             state = max(state, STATE_CRITICAL)
 
         if not hostname_match:
@@ -319,7 +319,7 @@ def main():
             f"TLS version:       {tls_version}",
             f"Chain depth:       {depth}",
             f"Issuing CA present: {'Yes' if issuing_ca_in_chain else 'NO - missing from handshake'}",
-            f"Chain verified:    {'Yes' if chain_verified else 'NO - cross-signed CA missing'}",
+            f"Chain verified:    {'Yes' if chain_verified else 'NO - incomplete chain'}",
             f"Hostname match:    {'Yes' if hostname_match else 'NO - mismatch'}",
             "",
             "Certificate path:",
