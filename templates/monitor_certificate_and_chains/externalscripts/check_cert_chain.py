@@ -8,10 +8,12 @@ Usage: check_cert_chain.py <hostname> <port>
 Output: JSON on stdout (always valid JSON, never raw exceptions)
 """
 
+import os
 import sys
 import json
 import subprocess
 import re
+import tempfile
 from datetime import datetime, timezone
 
 CONNECT_TIMEOUT = 15
@@ -162,6 +164,63 @@ def check_hostname_match(hostname, cert_info):
     return 0
 
 
+def verify_chain_self_contained(pem_certs, cert_infos):
+    """
+    Verify the leaf cert using only the certificates the server presented.
+    Self-signed certs in the chain are used as trust anchors (e.g. ISRG Root X1).
+    Intermediates are passed as -untrusted.
+
+    Returns 1 if the chain verifies, 0 if it is broken or incomplete.
+    A broken chain means the server is not sending all required intermediate CAs —
+    clients that lack AIA-fetching or a newer trust store will fail validation.
+    """
+    if not pem_certs:
+        return 0
+
+    trust_anchor_pems = [
+        pem_certs[i] for i, c in enumerate(cert_infos) if c.get("is_self_signed")
+    ]
+    intermediate_pems = [
+        pem_certs[i] for i, c in enumerate(cert_infos)
+        if i > 0 and not c.get("is_self_signed")
+    ]
+
+    if not trust_anchor_pems:
+        return 0
+
+    tmp_files = []
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix="_ca.pem", delete=False) as f:
+            f.write("\n".join(trust_anchor_pems))
+            ca_path = f.name
+            tmp_files.append(ca_path)
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix="_leaf.pem", delete=False) as f:
+            f.write(pem_certs[0])
+            leaf_path = f.name
+            tmp_files.append(leaf_path)
+
+        args = ["verify", "-CAfile", ca_path]
+
+        if intermediate_pems:
+            with tempfile.NamedTemporaryFile(mode="w", suffix="_chain.pem", delete=False) as f:
+                f.write("\n".join(intermediate_pems))
+                chain_path = f.name
+                tmp_files.append(chain_path)
+            args += ["-untrusted", chain_path]
+
+        args.append(leaf_path)
+        _, _, returncode = run_openssl(args)
+        return 1 if returncode == 0 else 0
+
+    finally:
+        for p in tmp_files:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
+
 def get_cn(subject):
     m = re.search(r"CN=([^,]+)", subject)
     return m.group(1).strip() if m else subject
@@ -215,13 +274,17 @@ def main():
         depth = len(cert_infos)
 
         # Issuing CA check: the cert that directly signed the leaf must be present.
-        # It must have a subject equal to the leaf's issuer field.
         leaf_issuer = leaf.get("issuer", "")
         issuing_ca_in_chain = 0
         for i in range(1, depth):
             if cert_infos[i].get("subject") == leaf_issuer:
                 issuing_ca_in_chain = 1
                 break
+
+        # Chain completeness: verify leaf using presented certs as trust bundle.
+        # Self-signed certs in the chain (e.g. ISRG Root X1) become trust anchors.
+        # Returns 0 if the chain is broken (missing intermediate like Root YR / Root YE).
+        chain_verified = verify_chain_self_contained(pem_certs, cert_infos)
 
         # Chain path (human-readable summary)
         chain_path = []
@@ -254,6 +317,7 @@ def main():
             "chain": {
                 "depth": depth,
                 "issuing_ca_in_chain": issuing_ca_in_chain,
+                "chain_verified": chain_verified,
                 "path": chain_path,
                 "certs": [
                     {

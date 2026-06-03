@@ -280,6 +280,31 @@ zabbix_export:
             - tag: component
               value: chain
 
+        - uuid: b7c2e1f4a8d34e5f9012345678901234
+          name: 'SSL certificate chain verified'
+          type: DEPENDENT
+          key: cert.chain_verified
+          delay: '0'
+          history: 7d
+          trends: 90d
+          value_type: UNSIGNED
+          description: |
+            1 = the full certificate chain presented by the server verifies correctly.
+            0 = chain is broken — one or more intermediate CAs are missing (e.g. Root YR for RSA, Root YE or ISRG Root X2 for ECDSA).
+            Verified using only the certificates the server sent, with self-signed certs as trust anchors.
+            A value of 0 means clients without AIA-fetching or an up-to-date trust store will fail validation.
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.chain.chain_verified'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '1'
+          master_item:
+            key: 'check_cert_chain.py[{HOST.NAME},{$CERT_PORT}]'
+          tags:
+            - tag: component
+              value: chain
+
         - uuid: a485e270fb5d48e4a4244c0b1ba68962
           name: 'SSL issuing CA present in chain'
           type: DEPENDENT
@@ -400,6 +425,27 @@ zabbix_export:
       name: 'Issuing CA not sent in TLS chain by {HOST.NAME}:{$CERT_PORT}'
       priority: HIGH
       description: 'The server is NOT including the intermediate (issuing) CA in the TLS handshake. Clients without AIA-fetching support will fail validation.'
+      tags:
+        - tag: scope
+          value: security
+      dependencies:
+        - name: 'SSL certificate check failed for {HOST.NAME}:{$CERT_PORT}'
+          expression: 'last(/Template - Certificate and Chain Monitor/cert.status)<>"ok"'
+
+    - uuid: f1e2d3c4b5a6978800112233445566778
+      expression: 'last(/Template - Certificate and Chain Monitor/cert.chain_verified)=0 and last(/Template - Certificate and Chain Monitor/cert.status)="ok"'
+      name: 'Incomplete TLS chain on {HOST.NAME}:{$CERT_PORT} — cross-signed CA missing'
+      priority: HIGH
+      description: |
+        The server is presenting an incomplete certificate chain. The chain cannot be verified
+        using only the certificates the server sent.
+
+        This typically means a cross-signed intermediate CA is missing, for example:
+          RSA:   Root YR (cross-signed by ISRG Root X1) is absent
+          ECDSA: Root YE or ISRG Root X2 (cross-signed by ISRG Root X1) is absent
+
+        Clients that do not have the newer ISRG root CAs in their trust store and cannot
+        perform AIA fetching will fail TLS validation.
       tags:
         - tag: scope
           value: security
