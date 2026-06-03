@@ -14,10 +14,12 @@ Usage: check_cert_chain_cmk.py -H <hostname> [-p <port>] [-w <warn_days>] [-c <c
 Exit codes: 0=OK, 1=WARNING, 2=CRITICAL, 3=UNKNOWN
 """
 
+import os
 import sys
 import subprocess
 import re
 import argparse
+import tempfile
 from datetime import datetime, timezone
 
 CONNECT_TIMEOUT = 15
@@ -139,6 +141,59 @@ def check_hostname_match(hostname, cert_info):
     return False
 
 
+def verify_chain_self_contained(pem_certs, cert_infos):
+    """
+    Verify the leaf cert using only the certificates the server presented.
+    Self-signed certs are used as trust anchors; others as -untrusted intermediates.
+    Returns True if chain verifies, False if broken/incomplete.
+    """
+    if not pem_certs:
+        return False
+
+    trust_anchor_pems = [
+        pem_certs[i] for i, c in enumerate(cert_infos) if c.get("is_self_signed")
+    ]
+    intermediate_pems = [
+        pem_certs[i] for i, c in enumerate(cert_infos)
+        if i > 0 and not c.get("is_self_signed")
+    ]
+
+    if not trust_anchor_pems:
+        return False
+
+    tmp_files = []
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix="_ca.pem", delete=False) as f:
+            f.write("\n".join(trust_anchor_pems))
+            ca_path = f.name
+            tmp_files.append(ca_path)
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix="_leaf.pem", delete=False) as f:
+            f.write(pem_certs[0])
+            leaf_path = f.name
+            tmp_files.append(leaf_path)
+
+        args = ["verify", "-CAfile", ca_path]
+
+        if intermediate_pems:
+            with tempfile.NamedTemporaryFile(mode="w", suffix="_chain.pem", delete=False) as f:
+                f.write("\n".join(intermediate_pems))
+                chain_path = f.name
+                tmp_files.append(chain_path)
+            args += ["-untrusted", chain_path]
+
+        args.append(leaf_path)
+        _, _, returncode = run_openssl(args)
+        return returncode == 0
+
+    finally:
+        for p in tmp_files:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
+
 def get_cn(subject):
     m = re.search(r"CN=([^,]+)", subject)
     return m.group(1).strip() if m else subject
@@ -198,6 +253,7 @@ def main():
         issuing_ca_in_chain = any(
             cert_infos[i].get("subject") == leaf_issuer for i in range(1, depth)
         )
+        chain_verified = verify_chain_self_contained(pem_certs, cert_infos)
 
         cn = get_cn(leaf.get("subject", hostname))
 
@@ -219,6 +275,10 @@ def main():
             issues.append("issuing CA missing from TLS chain")
             state = max(state, STATE_CRITICAL)
 
+        if not chain_verified and not is_self_signed:
+            issues.append("incomplete chain — cross-signed CA missing (Root YR / Root YE / ISRG Root X2)")
+            state = max(state, STATE_CRITICAL)
+
         if not hostname_match:
             issues.append(f"hostname mismatch (cert CN: {cn})")
             state = max(state, STATE_CRITICAL)
@@ -231,6 +291,7 @@ def main():
         perfdata = [
             f"days_remaining={days_remaining};{warn_days};{crit_days};;",
             f"issuing_ca_in_chain={1 if issuing_ca_in_chain else 0};;;;",
+            f"chain_verified={1 if chain_verified else 0};;;;",
             f"hostname_match={1 if hostname_match else 0};;;;",
             f"chain_depth={depth};;;;",
         ]
@@ -252,6 +313,7 @@ def main():
             f"TLS version:       {tls_version}",
             f"Chain depth:       {depth}",
             f"Issuing CA present: {'Yes' if issuing_ca_in_chain else 'NO - missing from handshake'}",
+            f"Chain verified:    {'Yes' if chain_verified else 'NO - cross-signed CA missing'}",
             f"Hostname match:    {'Yes' if hostname_match else 'NO - mismatch'}",
             "",
             "Certificate path:",
