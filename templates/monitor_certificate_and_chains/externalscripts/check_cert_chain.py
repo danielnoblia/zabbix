@@ -14,6 +14,8 @@ import json
 import subprocess
 import re
 import tempfile
+import hashlib
+import base64
 from datetime import datetime, timezone
 
 CONNECT_TIMEOUT = 15
@@ -229,6 +231,28 @@ def verify_chain(pem_certs, cert_infos, s_client_output):
                 pass
 
 
+def get_spki_pin(pem_cert):
+    """Compute SHA-256 SPKI pin (base64) — standard HPKP/TLS-pinning format."""
+    pubkey_pem, _, rc = run_openssl(
+        ["x509", "-pubkey", "-noout"],
+        stdin_bytes=pem_cert.encode(),
+    )
+    if rc != 0 or not pubkey_pem.strip():
+        return ""
+    try:
+        der_result = subprocess.run(
+            ["openssl", "pkey", "-pubin", "-outform", "DER"],
+            input=pubkey_pem.encode(),
+            capture_output=True,
+            timeout=CONNECT_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return ""
+    if der_result.returncode != 0 or not der_result.stdout:
+        return ""
+    return base64.b64encode(hashlib.sha256(der_result.stdout).digest()).decode()
+
+
 def get_cn(subject):
     m = re.search(r"CN=([^,]+)", subject)
     return m.group(1).strip() if m else subject
@@ -278,6 +302,7 @@ def main():
         cert_infos = [parse_cert(p) for p in pem_certs]
         leaf = cert_infos[0]
         leaf["hostname_match"] = check_hostname_match(hostname, leaf)
+        leaf["spki_pin"] = get_spki_pin(pem_certs[0])
 
         depth = len(cert_infos)
 
@@ -321,6 +346,7 @@ def main():
                 "hostname_match": leaf.get("hostname_match", 0),
                 "is_expired": leaf.get("is_expired", 1),
                 "is_self_signed": leaf.get("is_self_signed", 0),
+                "spki_pin": leaf.get("spki_pin", ""),
             },
             "chain": {
                 "depth": depth,

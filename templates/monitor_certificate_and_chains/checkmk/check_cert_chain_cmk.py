@@ -9,7 +9,7 @@ SETUP (CheckMK):
   3. In CheckMK Setup: add as "Classical active check" on the relevant host
      Command: check_cert_chain_cmk.py -H $HOSTADDRESS$ -p 443
 
-Usage: check_cert_chain_cmk.py -H <hostname> [-p <port>] [-w <warn_days>] [-c <crit_days>]
+Usage: check_cert_chain_cmk.py -H <hostname> [-p <port>] [-w <warn_days>] [-c <crit_days>] [-s <spki_pin>]
 
 Exit codes: 0=OK, 1=WARNING, 2=CRITICAL, 3=UNKNOWN
 """
@@ -20,6 +20,8 @@ import subprocess
 import re
 import argparse
 import tempfile
+import hashlib
+import base64
 from datetime import datetime, timezone
 
 CONNECT_TIMEOUT = 15
@@ -200,6 +202,28 @@ def verify_chain(pem_certs, cert_infos, s_client_output):
                 pass
 
 
+def get_spki_pin(pem_cert):
+    """Compute SHA-256 SPKI pin (base64) — standard HPKP/TLS-pinning format."""
+    pubkey_pem, _, rc = run_openssl(
+        ["x509", "-pubkey", "-noout"],
+        stdin_bytes=pem_cert.encode(),
+    )
+    if rc != 0 or not pubkey_pem.strip():
+        return ""
+    try:
+        der_result = subprocess.run(
+            ["openssl", "pkey", "-pubin", "-outform", "DER"],
+            input=pubkey_pem.encode(),
+            capture_output=True,
+            timeout=CONNECT_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return ""
+    if der_result.returncode != 0 or not der_result.stdout:
+        return ""
+    return base64.b64encode(hashlib.sha256(der_result.stdout).digest()).decode()
+
+
 def get_cn(subject):
     m = re.search(r"CN=([^,]+)", subject)
     return m.group(1).strip() if m else subject
@@ -222,12 +246,14 @@ def main():
     parser.add_argument("-p", "--port", type=int, default=443, help="TCP port (default: 443)")
     parser.add_argument("-w", "--warning", type=int, default=30, help="Warning days before expiry (default: 30)")
     parser.add_argument("-c", "--critical", type=int, default=14, help="Critical days before expiry (default: 14)")
+    parser.add_argument("-s", "--spki-pin", default="", help="Expected SHA-256 SPKI pin (base64). Leave empty to disable pin check.")
     args = parser.parse_args()
 
     hostname = args.hostname
     port = args.port
     warn_days = args.warning
     crit_days = args.critical
+    expected_spki_pin = args.spki_pin
 
     try:
         s_client_out, s_client_err = fetch_server_chain(hostname, port)
@@ -260,6 +286,7 @@ def main():
             cert_infos[i].get("subject") == leaf_issuer for i in range(1, depth)
         )
         chain_verified = verify_chain(pem_certs, cert_infos, s_client_out)
+        spki_pin = get_spki_pin(pem_certs[0])
 
         cn = get_cn(leaf.get("subject", hostname))
 
@@ -293,6 +320,11 @@ def main():
             issues.append("self-signed certificate")
             state = max(state, STATE_WARNING)
 
+        spki_pin_mismatch = bool(expected_spki_pin and spki_pin != expected_spki_pin)
+        if spki_pin_mismatch:
+            issues.append("SPKI pin mismatch — public key has changed")
+            state = max(state, STATE_CRITICAL)
+
         # Performance data (for CheckMK graphs and thresholds)
         perfdata = [
             f"days_remaining={days_remaining};{warn_days};{crit_days};;",
@@ -321,6 +353,11 @@ def main():
             f"Issuing CA present: {'Yes' if issuing_ca_in_chain else 'NO - missing from handshake'}",
             f"Chain verified:    {'Yes' if chain_verified else 'NO - incomplete chain'}",
             f"Hostname match:    {'Yes' if hostname_match else 'NO - mismatch'}",
+            f"SPKI pin:          {spki_pin or 'unavailable'}",
+        ]
+        if spki_pin_mismatch:
+            details.append(f"  Expected pin:    {expected_spki_pin}")
+        details += [
             "",
             "Certificate path:",
         ]

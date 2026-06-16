@@ -36,6 +36,9 @@ zabbix_export:
         - macro: '{$CERT_EXPIRY_CRIT_DAYS}'
           value: '14'
           description: 'Days remaining before HIGH trigger fires.'
+        - macro: '{$CERT_SPKI_PIN}'
+          value: ''
+          description: 'Expected SHA-256 SPKI pin (base64) for the leaf certificate public key. Leave empty to disable SPKI pin monitoring. Set to the value of the cert.spki_pin item to activate — trigger fires if the pin changes.'
       items:
         # ── Master item ──────────────────────────────────────────────────────────
         - uuid: d57ffb46b69941afaa0cacd507581c90
@@ -347,6 +350,30 @@ zabbix_export:
             - tag: component
               value: chain
 
+        - uuid: cc8c3c53ccf34305be9fe3578235c882
+          name: 'SSL certificate SPKI pin'
+          type: DEPENDENT
+          key: cert.spki_pin
+          delay: '0'
+          history: 14d
+          trends: '0'
+          value_type: CHAR
+          description: |
+            SHA-256 hash of the leaf certificate SubjectPublicKeyInfo (SPKI), base64-encoded.
+            This is the public key fingerprint used for TLS/HPKP pinning.
+            Copy this value to the host macro {$CERT_SPKI_PIN} to enable change detection.
+          preprocessing:
+            - type: JSONPATH
+              parameters:
+                - '$.leaf_cert.spki_pin'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: ''
+          master_item:
+            key: 'check_cert_chain.py[{HOST.NAME},{$CERT_PORT}]'
+          tags:
+            - tag: component
+              value: certificate
+
         - uuid: 2d5d2feb31764e2a8bd21d1a7eb88de2
           name: 'SSL/TLS protocol version'
           type: DEPENDENT
@@ -470,6 +497,30 @@ zabbix_export:
       name: 'Self-signed certificate detected on {HOST.NAME}:{$CERT_PORT}'
       priority: WARNING
       description: 'The server is presenting a self-signed certificate. Public clients will not trust it.'
+      tags:
+        - tag: scope
+          value: security
+      dependencies:
+        - name: 'SSL certificate check failed for {HOST.NAME}:{$CERT_PORT}'
+          expression: 'last(/Template - Certificate and Chain Monitor/cert.status)<>"ok"'
+
+    - uuid: 61e9afa5f27f41f1b96de602460c7e56
+      expression: '{$CERT_SPKI_PIN}<>"" and last(/Template - Certificate and Chain Monitor/cert.spki_pin)<>{$CERT_SPKI_PIN} and last(/Template - Certificate and Chain Monitor/cert.status)="ok"'
+      name: 'SPKI pin mismatch on {HOST.NAME}:{$CERT_PORT}'
+      priority: HIGH
+      description: |
+        The public key of the leaf certificate has changed and no longer matches the pinned value in {$CERT_SPKI_PIN}.
+
+        This means the private key on the server has been replaced — intentionally or not.
+        Backend services that pin this public key will lose trust and client connections will fail.
+
+        Resolve by either:
+          1. Restoring the certificate using the original private key (or from a PFX backup)
+          2. Issuing a new certificate with the same key pair
+          3. If the key change is intentional: update {$CERT_SPKI_PIN} on this host to the new pin value and update all dependent trust relationships
+
+        Current pin: {ITEM.VALUE}
+        Expected pin: {$CERT_SPKI_PIN}
       tags:
         - tag: scope
           value: security
