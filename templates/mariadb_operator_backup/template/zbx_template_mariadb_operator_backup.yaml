@@ -1,0 +1,170 @@
+zabbix_export:
+  version: '7.4'
+  template_groups:
+    - uuid: 11440938ba2c4b808539ba51b84c244a
+      name: 'Templates/Databases'
+  templates:
+    - uuid: cf38c86553c2458d8d7af45b6a10118f
+      template: 'Template - MariaDB Operator Backup by HTTP'
+      name: 'MariaDB Operator Backup by HTTP'
+      description: |
+        Monitors a scheduled mariadb-operator Backup (Kubernetes CronJob) via kube-state-metrics.
+
+        SETUP:
+          1. Link this template to the host that is monitored by the in-cluster Zabbix proxy
+             (the same host that has "Kubernetes cluster state by HTTP"), so the HTTP agent
+             item can resolve the kube-state-metrics service name.
+          2. Override {$BACKUP.NAMESPACE} and {$BACKUP.CRONJOB} if they differ from db/backup.
+             The CronJob created by mariadb-operator has the same name as the Backup resource.
+
+        WHAT IS CHECKED:
+          - The last scheduled run did not succeed (fires shortly after a failed nightly run)
+          - No successful backup within {$BACKUP.MAX_AGE} seconds (default 26h)
+          - kube-state-metrics is not returning data
+
+        Requires kube-state-metrics with the cronjobs collector enabled (default).
+      groups:
+        - name: 'Templates/Databases'
+      macros:
+        - macro: '{$KSM.URL}'
+          value: 'http://zabbix-kube-state-metrics.monitoring.svc.cluster.local:8080/metrics'
+          description: 'kube-state-metrics metrics endpoint, reachable from the Zabbix proxy.'
+        - macro: '{$BACKUP.NAMESPACE}'
+          value: db
+          description: 'Namespace of the mariadb-operator Backup resource.'
+        - macro: '{$BACKUP.CRONJOB}'
+          value: backup
+          description: 'Name of the CronJob (same as the Backup resource name).'
+        - macro: '{$BACKUP.MAX_AGE}'
+          value: '93600'
+          description: 'Seconds since last successful backup before alerting (default 26h = daily schedule + 2h margin).'
+        - macro: '{$BACKUP.RUN.GRACE}'
+          value: '3600'
+          description: 'Seconds a scheduled run may take (including retries) before it is considered failed.'
+        - macro: '{$KSM.NODATA}'
+          value: 30m
+          description: 'Alert when no data has been received from kube-state-metrics for this long.'
+      items:
+        # ── Master item ──────────────────────────────────────────────────────────
+        - uuid: 193e8361cb474dc1984355f9c49b80ff
+          name: 'kube-state-metrics: raw metrics'
+          type: HTTP_AGENT
+          key: mariadb.backup.ksm.raw
+          delay: 5m
+          timeout: 15s
+          history: '0'
+          trends: '0'
+          value_type: TEXT
+          url: '{$KSM.URL}'
+          description: 'Raw Prometheus output from kube-state-metrics. All other items derive from this.'
+          tags:
+            - tag: component
+              value: backup
+
+        # ── Dependent items ───────────────────────────────────────────────────────
+        - uuid: 2303dfa8e4e94ba9b9aeb6dde0568b4b
+          name: 'Backup {$BACKUP.NAMESPACE}/{$BACKUP.CRONJOB}: last successful run'
+          type: DEPENDENT
+          key: mariadb.backup.last_success
+          history: 90d
+          value_type: FLOAT
+          units: unixtime
+          description: 'CronJob .status.lastSuccessfulTime. Set to 0 if the metric is missing (CronJob deleted or never succeeded).'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'kube_cronjob_status_last_successful_time{namespace="{$BACKUP.NAMESPACE}",cronjob="{$BACKUP.CRONJOB}"}'
+                - value
+                - ''
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '0'
+          master_item:
+            key: mariadb.backup.ksm.raw
+          tags:
+            - tag: component
+              value: backup
+
+        - uuid: 0b23a95625aa4b869b0fd6e1857b2885
+          name: 'Backup {$BACKUP.NAMESPACE}/{$BACKUP.CRONJOB}: last scheduled run'
+          type: DEPENDENT
+          key: mariadb.backup.last_schedule
+          history: 90d
+          value_type: FLOAT
+          units: unixtime
+          description: 'CronJob .status.lastScheduleTime. Set to 0 if the metric is missing.'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - 'kube_cronjob_status_last_schedule_time{namespace="{$BACKUP.NAMESPACE}",cronjob="{$BACKUP.CRONJOB}"}'
+                - value
+                - ''
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '0'
+          master_item:
+            key: mariadb.backup.ksm.raw
+          tags:
+            - tag: component
+              value: backup
+
+        # ── Calculated items ──────────────────────────────────────────────────────
+        - uuid: 703aa7db612d47ecac3247418f09b4dd
+          name: 'Backup {$BACKUP.NAMESPACE}/{$BACKUP.CRONJOB}: time since last successful run'
+          type: CALCULATED
+          key: mariadb.backup.age
+          delay: 5m
+          history: 90d
+          units: s
+          params: 'now()-last(//mariadb.backup.last_success)'
+          description: 'Seconds since the last successful backup.'
+          tags:
+            - tag: component
+              value: backup
+
+  triggers:
+    - uuid: 4d6d1a02b57b44f3a7c18301a24c0090
+      expression: 'nodata(/Template - MariaDB Operator Backup by HTTP/mariadb.backup.last_success,{$KSM.NODATA})=1'
+      name: 'Backup {$BACKUP.NAMESPACE}/{$BACKUP.CRONJOB}: no data from kube-state-metrics for {$KSM.NODATA}'
+      priority: WARNING
+      description: 'The HTTP agent item could not fetch {$KSM.URL}. Backup status is unknown. Check the kube-state-metrics pod and the Zabbix proxy.'
+      tags:
+        - tag: scope
+          value: availability
+
+    - uuid: 08e8bad4a86546fda4180fde6cb3113d
+      expression: 'last(/Template - MariaDB Operator Backup by HTTP/mariadb.backup.last_schedule)-last(/Template - MariaDB Operator Backup by HTTP/mariadb.backup.last_success)>{$BACKUP.RUN.GRACE} and now()-last(/Template - MariaDB Operator Backup by HTTP/mariadb.backup.last_schedule)>{$BACKUP.RUN.GRACE}'
+      name: 'Backup {$BACKUP.NAMESPACE}/{$BACKUP.CRONJOB}: last scheduled run did not succeed'
+      priority: HIGH
+      description: |
+        The CronJob was scheduled more than {$BACKUP.RUN.GRACE} seconds ago, but lastSuccessfulTime is older than that run.
+        The backup job failed (all retries used) or is still hanging.
+
+        Investigate:
+          kubectl -n {$BACKUP.NAMESPACE} get backup,cronjob,jobs
+          kubectl -n {$BACKUP.NAMESPACE} logs job/<latest job> --all-containers
+
+        Common causes: S3 endpoint unreachable, expired TLS certificate on the S3 endpoint, wrong credentials, database unavailable.
+        Recovers automatically after the next successful run.
+      tags:
+        - tag: scope
+          value: availability
+      dependencies:
+        - name: 'Backup {$BACKUP.NAMESPACE}/{$BACKUP.CRONJOB}: no data from kube-state-metrics for {$KSM.NODATA}'
+          expression: 'nodata(/Template - MariaDB Operator Backup by HTTP/mariadb.backup.last_success,{$KSM.NODATA})=1'
+
+    - uuid: 92848f5b872b498dad54e9339d7ea39b
+      expression: 'last(/Template - MariaDB Operator Backup by HTTP/mariadb.backup.age)>{$BACKUP.MAX_AGE}'
+      name: 'Backup {$BACKUP.NAMESPACE}/{$BACKUP.CRONJOB}: no successful backup for more than {$BACKUP.MAX_AGE}s'
+      priority: HIGH
+      description: |
+        No successful backup within {$BACKUP.MAX_AGE} seconds.
+        If "last scheduled run did not succeed" is not active, the CronJob is not being scheduled at all:
+        it may be suspended, deleted, or the Backup resource was recreated and has not run yet.
+        A missing metric is reported as 0, so a deleted CronJob also ends up here.
+      tags:
+        - tag: scope
+          value: availability
+      dependencies:
+        - name: 'Backup {$BACKUP.NAMESPACE}/{$BACKUP.CRONJOB}: last scheduled run did not succeed'
+          expression: 'last(/Template - MariaDB Operator Backup by HTTP/mariadb.backup.last_schedule)-last(/Template - MariaDB Operator Backup by HTTP/mariadb.backup.last_success)>{$BACKUP.RUN.GRACE} and now()-last(/Template - MariaDB Operator Backup by HTTP/mariadb.backup.last_schedule)>{$BACKUP.RUN.GRACE}'
+        - name: 'Backup {$BACKUP.NAMESPACE}/{$BACKUP.CRONJOB}: no data from kube-state-metrics for {$KSM.NODATA}'
+          expression: 'nodata(/Template - MariaDB Operator Backup by HTTP/mariadb.backup.last_success,{$KSM.NODATA})=1'
