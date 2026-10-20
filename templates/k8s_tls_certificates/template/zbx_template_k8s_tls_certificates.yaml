@@ -1,0 +1,383 @@
+zabbix_export:
+  version: '7.4'
+  template_groups:
+    - uuid: 5bb14a318a1c40cc949ea816f3214cb8
+      name: 'Templates/Applications'
+  templates:
+    - uuid: 9d9f644f35464bd0a2380ef46a0a96a3
+      template: 'Template - Kubernetes TLS certificates by HTTP'
+      name: 'Kubernetes TLS certificates by HTTP'
+      description: |
+        Monitors expiry of the TLS certificates held by Traefik (ACME) and issued by cert-manager,
+        using their Prometheus metrics. No private keys or certificate files are read.
+
+        SETUP:
+          1. Traefik metrics must be reachable through a Service, e.g. traefik-metrics.traefik.svc:9100
+             (the Helm chart only exposes the metrics port on the pod).
+          2. Link this template to the host that is monitored by the in-cluster Zabbix proxy
+             (the same host that has "Kubernetes cluster state by HTTP"), so the service names resolve.
+          3. Adjust {$TRAEFIK.METRICS.URL} / {$CERTMANAGER.METRICS.URL} if the services differ.
+
+        WHAT IS CHECKED:
+          - Every certificate Traefik holds (one item per CN, discovered automatically)
+          - Every cert-manager Certificate (expiry and Ready condition)
+          - Both metrics endpoints answer
+
+        Traefik and cert-manager renew 30 days before expiry, so {$CERT.EXPIRY.WARN} (20 days)
+        means renewal has been failing for about 10 days. Thresholds can be overridden per
+        certificate with macro context, e.g. {$CERT.EXPIRY.WARN:"pb.noblia.se"}.
+      groups:
+        - name: 'Templates/Applications'
+      macros:
+        - macro: '{$TRAEFIK.METRICS.URL}'
+          value: 'http://traefik-metrics.traefik.svc.cluster.local:9100/metrics'
+          description: 'Traefik Prometheus endpoint, reachable from the Zabbix proxy.'
+        - macro: '{$CERTMANAGER.METRICS.URL}'
+          value: 'http://cert-manager.cert-manager.svc.cluster.local:9402/metrics'
+          description: 'cert-manager controller Prometheus endpoint, reachable from the Zabbix proxy.'
+        - macro: '{$CERT.EXPIRY.WARN}'
+          value: '20'
+          description: 'Days remaining before WARNING. Renewal normally happens at 30 days.'
+        - macro: '{$CERT.EXPIRY.HIGH}'
+          value: '7'
+          description: 'Days remaining before HIGH.'
+        - macro: '{$CERT.METRICS.NODATA}'
+          value: 3h
+          description: 'Alert when a metrics endpoint has not answered for this long.'
+        - macro: '{$CERT.NOT_READY.TIME}'
+          value: 1h
+          description: 'How long a cert-manager Certificate may be not Ready before alerting.'
+        - macro: '{$TRAEFIK.CERT.CN.MATCHES}'
+          value: '.*'
+          description: 'Discover only Traefik certificates whose CN matches this regex.'
+        - macro: '{$TRAEFIK.CERT.CN.NOT_MATCHES}'
+          value: '^$'
+          description: 'Do not discover Traefik certificates whose CN matches this regex (e.g. retired names).'
+      items:
+        # ── Master items ─────────────────────────────────────────────────────────
+        - uuid: 2192ceaa868c4773882e1b032883a5ee
+          name: 'Traefik: raw metrics'
+          type: HTTP_AGENT
+          key: traefik.metrics.raw
+          delay: 15m
+          timeout: 15s
+          history: '0'
+          trends: '0'
+          value_type: TEXT
+          url: '{$TRAEFIK.METRICS.URL}'
+          description: 'Raw Prometheus output from Traefik. All Traefik certificate items derive from this.'
+          tags:
+            - tag: component
+              value: traefik
+        - uuid: 61228cacf04746eeaefe3baf9411b59e
+          name: 'cert-manager: raw metrics'
+          type: HTTP_AGENT
+          key: certmanager.metrics.raw
+          delay: 15m
+          timeout: 15s
+          history: '0'
+          trends: '0'
+          value_type: TEXT
+          url: '{$CERTMANAGER.METRICS.URL}'
+          description: 'Raw Prometheus output from the cert-manager controller. All cert-manager items derive from this.'
+          tags:
+            - tag: component
+              value: cert-manager
+
+        # ── Dependent items ──────────────────────────────────────────────────────
+        - uuid: 5115cd484b9c49e3a5349224ff7cbe97
+          name: 'Traefik: number of certificates'
+          type: DEPENDENT
+          key: traefik.certs.count
+          history: 90d
+          description: 'Number of certificate series in traefik_tls_certs_not_after. Used to detect a silent endpoint.'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - traefik_tls_certs_not_after
+                - function
+                - count
+          master_item:
+            key: traefik.metrics.raw
+          tags:
+            - tag: component
+              value: traefik
+        - uuid: 05cf6953fc974a50af2078da4c7f9996
+          name: 'cert-manager: number of certificates'
+          type: DEPENDENT
+          key: certmanager.certs.count
+          history: 90d
+          description: 'Number of series in certmanager_certificate_expiration_timestamp_seconds. Used to detect a silent endpoint.'
+          preprocessing:
+            - type: PROMETHEUS_PATTERN
+              parameters:
+                - certmanager_certificate_expiration_timestamp_seconds
+                - function
+                - count
+          master_item:
+            key: certmanager.metrics.raw
+          tags:
+            - tag: component
+              value: cert-manager
+
+      discovery_rules:
+        # ── Traefik: one entry per CN ────────────────────────────────────────────
+        - uuid: 815bbb81260c457bba4e9345caf3ec57
+          name: 'Traefik certificate discovery'
+          type: DEPENDENT
+          key: traefik.certs.discovery
+          lifetime: 7d
+          description: 'One entry per certificate CN in Traefik (ACME and certificates from Kubernetes secrets).'
+          filter:
+            evaltype: AND
+            conditions:
+              - macro: '{#CN}'
+                value: '{$TRAEFIK.CERT.CN.MATCHES}'
+              - macro: '{#CN}'
+                value: '{$TRAEFIK.CERT.CN.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+          master_item:
+            key: traefik.metrics.raw
+          preprocessing:
+            - type: PROMETHEUS_TO_JSON
+              parameters:
+                - traefik_tls_certs_not_after
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  // A CN can appear more than once (old and renewed certificate); keep one entry per CN.
+                  var metrics = JSON.parse(value), seen = {}, out = [];
+                  for (var i = 0; i < metrics.length; i++) {
+                      var cn = metrics[i].labels.cn;
+                      if (cn && !seen[cn]) {
+                          seen[cn] = true;
+                          out.push({'{#CN}': cn});
+                      }
+                  }
+                  return JSON.stringify(out);
+          item_prototypes:
+            - uuid: 69fe5abae2194995b49490cca199269f
+              name: 'Traefik certificate {#CN}: expires'
+              type: DEPENDENT
+              key: 'traefik.cert.not_after["{#CN}"]'
+              history: 90d
+              units: unixtime
+              description: 'Latest expiry among the certificates with this CN (max, so an old not-renewed copy is ignored).'
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'traefik_tls_certs_not_after{cn="{#CN}"}'
+                    - function
+                    - max
+              master_item:
+                key: traefik.metrics.raw
+              tags:
+                - tag: component
+                  value: traefik
+                - tag: certificate
+                  value: '{#CN}'
+            - uuid: b6684d6ae4a74c42a63dc05d71e5cfe4
+              name: 'Traefik certificate {#CN}: days remaining'
+              type: DEPENDENT
+              key: 'traefik.cert.days["{#CN}"]'
+              history: 90d
+              value_type: FLOAT
+              units: d
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'traefik_tls_certs_not_after{cn="{#CN}"}'
+                    - function
+                    - max
+                - type: JAVASCRIPT
+                  parameters:
+                    - 'return (parseFloat(value) - Date.now() / 1000) / 86400;'
+              master_item:
+                key: traefik.metrics.raw
+              tags:
+                - tag: component
+                  value: traefik
+                - tag: certificate
+                  value: '{#CN}'
+          trigger_prototypes:
+            - uuid: 553de1f171994b8db487db83ded35e11
+              expression: 'last(/Template - Kubernetes TLS certificates by HTTP/traefik.cert.days["{#CN}"])<{$CERT.EXPIRY.HIGH:"{#CN}"}'
+              name: 'Traefik certificate {#CN} expires in {ITEM.LASTVALUE1}'
+              opdata: 'Expires: {ITEM.LASTVALUE1}'
+              priority: HIGH
+              description: |
+                Traefik did not renew the certificate. HAProxy verifies Traefik's certificate (sni = Host),
+                so when it expires the service answers 503 through HAProxy.
+                Check: kubectl -n traefik logs deploy/traefik | grep -i acme
+                Common causes: Cloudflare API credentials (secret cloudflare-credentials), Let's Encrypt rate limits,
+                or the router for this name was removed (then exclude it with {$TRAEFIK.CERT.CN.NOT_MATCHES}).
+              tags:
+                - tag: scope
+                  value: security
+            - uuid: e62c58e32c694b688c2948d50874e611
+              expression: 'last(/Template - Kubernetes TLS certificates by HTTP/traefik.cert.days["{#CN}"])<{$CERT.EXPIRY.WARN:"{#CN}"}'
+              name: 'Traefik certificate {#CN} expires in {ITEM.LASTVALUE1}'
+              opdata: 'Expires: {ITEM.LASTVALUE1}'
+              priority: WARNING
+              description: 'Traefik renews 30 days before expiry, so renewal has been failing for about 10 days. See the HIGH trigger for causes.'
+              dependencies:
+                - name: 'Traefik certificate {#CN} expires in {ITEM.LASTVALUE1}'
+                  expression: 'last(/Template - Kubernetes TLS certificates by HTTP/traefik.cert.days["{#CN}"])<{$CERT.EXPIRY.HIGH:"{#CN}"}'
+              tags:
+                - tag: scope
+                  value: security
+
+        # ── cert-manager: one entry per Certificate ──────────────────────────────
+        - uuid: bcf0fb6ebb9145619d735a523ce0efa3
+          name: 'cert-manager certificate discovery'
+          type: DEPENDENT
+          key: certmanager.certs.discovery
+          lifetime: 7d
+          description: 'One entry per cert-manager Certificate resource.'
+          master_item:
+            key: certmanager.metrics.raw
+          preprocessing:
+            - type: PROMETHEUS_TO_JSON
+              parameters:
+                - certmanager_certificate_expiration_timestamp_seconds
+            - type: JAVASCRIPT
+              parameters:
+                - |
+                  var metrics = JSON.parse(value), seen = {}, out = [];
+                  for (var i = 0; i < metrics.length; i++) {
+                      var l = metrics[i].labels, id = l.namespace + '/' + l.name;
+                      if (!seen[id]) {
+                          seen[id] = true;
+                          out.push({'{#NAMESPACE}': l.namespace, '{#NAME}': l.name, '{#ISSUER}': l.issuer_name});
+                      }
+                  }
+                  return JSON.stringify(out);
+          item_prototypes:
+            - uuid: 29b89e92eb024f76ad95c8d36588bd2c
+              name: 'cert-manager {#NAMESPACE}/{#NAME}: expires'
+              type: DEPENDENT
+              key: 'certmanager.cert.not_after[{#NAMESPACE},{#NAME}]'
+              history: 90d
+              units: unixtime
+              description: 'Issuer: {#ISSUER}'
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'certmanager_certificate_expiration_timestamp_seconds{namespace="{#NAMESPACE}",name="{#NAME}"}'
+                    - value
+                    - ''
+              master_item:
+                key: certmanager.metrics.raw
+              tags:
+                - tag: component
+                  value: cert-manager
+                - tag: certificate
+                  value: '{#NAMESPACE}/{#NAME}'
+            - uuid: 30020e821e3148cdabb45c56c8141687
+              name: 'cert-manager {#NAMESPACE}/{#NAME}: days remaining'
+              type: DEPENDENT
+              key: 'certmanager.cert.days[{#NAMESPACE},{#NAME}]'
+              history: 90d
+              value_type: FLOAT
+              units: d
+              description: 'Issuer: {#ISSUER}'
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'certmanager_certificate_expiration_timestamp_seconds{namespace="{#NAMESPACE}",name="{#NAME}"}'
+                    - value
+                    - ''
+                - type: JAVASCRIPT
+                  parameters:
+                    - 'return (parseFloat(value) - Date.now() / 1000) / 86400;'
+              master_item:
+                key: certmanager.metrics.raw
+              tags:
+                - tag: component
+                  value: cert-manager
+                - tag: certificate
+                  value: '{#NAMESPACE}/{#NAME}'
+            - uuid: 8ace787d1e0f46b588dfbfe602ac8b05
+              name: 'cert-manager {#NAMESPACE}/{#NAME}: ready'
+              type: DEPENDENT
+              key: 'certmanager.cert.ready[{#NAMESPACE},{#NAME}]'
+              history: 90d
+              description: '1 = Ready condition True, 0 = False/Unknown or missing.'
+              valuemap:
+                name: 'cert-manager ready'
+              preprocessing:
+                - type: PROMETHEUS_PATTERN
+                  parameters:
+                    - 'certmanager_certificate_ready_status{namespace="{#NAMESPACE}",name="{#NAME}",condition="True"}'
+                    - value
+                    - ''
+                  error_handler: CUSTOM_VALUE
+                  error_handler_params: '0'
+              master_item:
+                key: certmanager.metrics.raw
+              tags:
+                - tag: component
+                  value: cert-manager
+                - tag: certificate
+                  value: '{#NAMESPACE}/{#NAME}'
+          trigger_prototypes:
+            - uuid: 69a9e1f4c64d4660bb92ec05fd7d09f7
+              expression: 'last(/Template - Kubernetes TLS certificates by HTTP/certmanager.cert.days[{#NAMESPACE},{#NAME}])<{$CERT.EXPIRY.HIGH:"{#NAME}"}'
+              name: 'cert-manager certificate {#NAMESPACE}/{#NAME} expires in {ITEM.LASTVALUE1}'
+              opdata: 'Expires: {ITEM.LASTVALUE1}'
+              priority: HIGH
+              description: |
+                cert-manager did not renew the certificate (issuer {#ISSUER}).
+                Check: kubectl -n {#NAMESPACE} describe certificate {#NAME}; kubectl get certificaterequest,order,challenge -A
+              tags:
+                - tag: scope
+                  value: security
+            - uuid: e06cff6ae3d0402cab81f879e31dfc31
+              expression: 'last(/Template - Kubernetes TLS certificates by HTTP/certmanager.cert.days[{#NAMESPACE},{#NAME}])<{$CERT.EXPIRY.WARN:"{#NAME}"}'
+              name: 'cert-manager certificate {#NAMESPACE}/{#NAME} expires in {ITEM.LASTVALUE1}'
+              opdata: 'Expires: {ITEM.LASTVALUE1}'
+              priority: WARNING
+              description: 'cert-manager renews 30 days before expiry by default, so renewal has been failing for about 10 days.'
+              dependencies:
+                - name: 'cert-manager certificate {#NAMESPACE}/{#NAME} expires in {ITEM.LASTVALUE1}'
+                  expression: 'last(/Template - Kubernetes TLS certificates by HTTP/certmanager.cert.days[{#NAMESPACE},{#NAME}])<{$CERT.EXPIRY.HIGH:"{#NAME}"}'
+              tags:
+                - tag: scope
+                  value: security
+            - uuid: 4a885f8967c54778a628cc94f1c87aa2
+              expression: 'max(/Template - Kubernetes TLS certificates by HTTP/certmanager.cert.ready[{#NAMESPACE},{#NAME}],{$CERT.NOT_READY.TIME})=0'
+              name: 'cert-manager certificate {#NAMESPACE}/{#NAME} is not Ready for {$CERT.NOT_READY.TIME}'
+              priority: WARNING
+              description: |
+                The Certificate has not been Ready for {$CERT.NOT_READY.TIME} (issuance or renewal failing).
+                Check: kubectl -n {#NAMESPACE} describe certificate {#NAME}
+              tags:
+                - tag: scope
+                  value: security
+
+      valuemaps:
+        - uuid: c8ab6beb7a6d4c3586adfe6595aa5d01
+          name: 'cert-manager ready'
+          mappings:
+            - value: '0'
+              newvalue: 'Not ready'
+            - value: '1'
+              newvalue: Ready
+
+  triggers:
+    - uuid: 78cd01148dab4ccebbe1766b71476764
+      expression: 'nodata(/Template - Kubernetes TLS certificates by HTTP/traefik.certs.count,{$CERT.METRICS.NODATA})=1'
+      name: 'Traefik: no certificate metrics for {$CERT.METRICS.NODATA}'
+      priority: WARNING
+      description: 'The HTTP agent could not fetch {$TRAEFIK.METRICS.URL}. Certificate expiry is unknown. Check the traefik-metrics Service and the Zabbix proxy.'
+      tags:
+        - tag: scope
+          value: availability
+    - uuid: 0d4743350c924de29efd3f0692dad9fe
+      expression: 'nodata(/Template - Kubernetes TLS certificates by HTTP/certmanager.certs.count,{$CERT.METRICS.NODATA})=1'
+      name: 'cert-manager: no certificate metrics for {$CERT.METRICS.NODATA}'
+      priority: WARNING
+      description: 'The HTTP agent could not fetch {$CERTMANAGER.METRICS.URL}. Certificate expiry is unknown. Check the cert-manager pod and the Zabbix proxy.'
+      tags:
+        - tag: scope
+          value: availability
